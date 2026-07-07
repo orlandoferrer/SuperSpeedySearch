@@ -1,0 +1,48 @@
+# Example node config for a Synology NAS container.
+node:
+  id: "synology-main"
+  name: "Synology"
+  listen_addr: "0.0.0.0:37373"
+  advertise: true
+  # Leave empty: a token is generated on first run and stored at
+  # /data/auth_token (check the container log or that file).
+  auth_token: ""
+
+database:
+  path: "/data/index.db"
+
+scan:
+  interval: "6h"
+  tombstone_retention_days: 30
+  watch:
+    enabled: true
+    max_watched_dirs: 50000
+
+roots:
+  - id: "nas-documents"
+    path: "/mnt/documents"
+    display_prefix: "Synology:Documents"
+    open_uri_prefix: "smb://synology.local/documents"
+    excludes:
+      paths:
+        - "#recycle"
+        - "@eaDir"
+    content_search:
+      enabled: true
+      max_file_size_mb: 25
+      include_extensions:
+        - ".txt"
+        - ".md"
+        - ".csv"
+        - ".json"
+
+# PDF live search needs pdftotext (included in the Docker image).
+# Enable here AND add ".pdf" to the root's include_extensions.
+content:
+  pdf:
+    enabled: false
+
+resource_limits:
+  max_parallel_content_searches: 2
+  max_search_seconds: 60
+  max_results_per_query: 500

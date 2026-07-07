@@ -1,0 +1,18 @@
+# Super Speedy Search node on Synology (Container Manager / docker compose).
+#
+# host networking is required for mDNS discovery. If you don't want host
+# networking, switch to `ports: ["37373:37373"]` and add this node to the GUI
+# manually by URL.
+services:
+  search-node:
+    image: super-speedy-search-node:latest
+    container_name: super-speedy-search-node
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./config:/config
+      - ./data:/data
+      # Mount every share you want searchable, read-only:
+      - /volume1/documents:/mnt/documents:ro
+    environment:
+      - SSS_CONFIG=/config/config.yaml

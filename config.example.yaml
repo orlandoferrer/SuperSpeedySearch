@@ -1,0 +1,57 @@
+# Example node config for a Mac/Linux computer.
+# Copy to one of:
+#   macOS:  ~/Library/Application Support/SuperSpeedySearch/config.yaml
+#   Linux:  ~/.config/super-speedy-search/config.yaml
+# or point at it with SSS_CONFIG=/path/to/config.yaml or -config.
+node:
+  id: "macbook-pro"
+  name: "MacBook Pro"
+  listen_addr: "0.0.0.0:37373"
+  advertise: true
+  # Auth is on by default. Leave auth_token empty to have the node generate
+  # one on first run; it is persisted next to the database (auth_token file).
+  auth_required: true
+  auth_token: ""
+
+database:
+  path: "~/Library/Application Support/SuperSpeedySearch/index.db"
+
+scan:
+  interval: "6h"
+  follow_symlinks: false
+  tombstone_retention_days: 30
+  watch:
+    enabled: true
+    max_watched_dirs: 50000
+    debounce_ms: 500
+
+roots:
+  - id: "home-documents"
+    path: "~/Documents"
+    display_prefix: "MacBook Pro:Documents"
+    open_uri_prefix: "file:///Users/you/Documents"
+    excludes:
+      paths:
+        - ".git"
+        - "node_modules"
+      extensions:
+        - ".tmp"
+    content_search:
+      enabled: true
+      max_file_size_mb: 25
+      include_extensions:
+        - ".txt"
+        - ".md"
+        - ".csv"
+        - ".json"
+        # Add ".pdf" only if content.pdf.enabled below and pdftotext installed.
+
+content:
+  pdf:
+    enabled: false
+    pdftotext_path: ""  # auto-detected on PATH when enabled
+
+resource_limits:
+  max_parallel_content_searches: 2
+  max_search_seconds: 60
+  max_results_per_query: 500
