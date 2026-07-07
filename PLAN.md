@@ -88,12 +88,13 @@ Reasons:
 - No separate service on NAS.
 - Mature Go drivers.
 
-Recommended Go driver:
+Go driver decision: use `modernc.org/sqlite` (pure Go, no CGO, cross-compiles cleanly for Synology Docker). It includes FTS5, so FTS5 support is not a reason to prefer CGO — it is only somewhat slower than CGO SQLite, which is acceptable at the expected scale (under ~2M rows per device). Switch to `github.com/mattn/go-sqlite3` only if measured performance demands it.
 
-- `modernc.org/sqlite` if avoiding CGO matters.
-- `github.com/mattn/go-sqlite3` if CGO is acceptable and SQLite feature support is the priority.
+Concurrency rules (the scanner writes while the API reads):
 
-For Synology Docker and easy cross-compilation, start by evaluating `modernc.org/sqlite`. If FTS5 support or performance becomes a problem, switch to CGO SQLite deliberately.
+- Enable WAL mode and a `busy_timeout` (e.g. 10s) at open.
+- Keep a single writer goroutine; batch scan upserts into transactions of a few hundred rows. Per-file transactions would make scans orders of magnitude slower.
+- Readers (search API) run concurrently under WAL without blocking the writer.
 
 ### Discovery
 
@@ -178,7 +179,7 @@ Controls needed before enabling FTS5 broadly:
 
 Each node scans configured roots and records metadata.
 
-V1 can rely on periodic scans and manual rescan. Filesystem watching can be added early, but correctness should not depend on watchers alone.
+V1 includes filesystem watching (freshness target: minutes, not hours), but correctness must not depend on watchers alone — the periodic reconciliation scan remains authoritative.
 
 Reasons:
 
@@ -189,29 +190,30 @@ Reasons:
 
 Recommended approach:
 
-- Periodic reconciliation scan.
-- Optional filesystem watcher for faster updates.
+- Filesystem watchers (fsnotify) enabled by default for near-real-time updates.
+- Watchers have a per-root watched-directory budget (inotify needs one watch per directory; kqueue on macOS consumes a file descriptor per watched item). If a root exceeds the budget, watching is disabled for that root and the node falls back to periodic scans.
+- Periodic reconciliation scan remains authoritative and repairs anything watchers missed.
 - Track `last_seen_scan_id` to detect deletes/missing files.
+- Change detection: a file is considered changed when its size or mtime differs. Without inode tracking, a rename appears as delete + add — acceptable for v1.
 - Throttle scanning to avoid high CPU/disk use.
+- Purge tombstones (`is_deleted = 1` rows) after a retention window (default 30 days) so the database does not grow forever.
 
 ### Metadata Extraction
 
-Store:
+Store per file (keep it minimal — everything else is derived):
 
-- Stable file ID if available.
-- Absolute path inside the node/container.
-- Display path.
 - Root ID.
-- Filename.
-- Lowercase filename for search.
+- Relative path within the root.
+- Filename and lowercase filename for search.
 - Extension.
-- MIME/type hint when cheap to determine.
 - Size.
 - Modified time.
 - Created time if available.
-- Last seen time.
+- Last seen time and scan ID.
 - Deleted/missing flag.
 - Error state if file is inaccessible.
+
+Do NOT store absolute path, display path, or open URIs per row. They are all derivable at response time from the root's `path`, `display_prefix`, and `open_uri_prefix` plus the relative path. Storing them per row would multiply database size roughly 5x at millions of rows and make root reconfiguration require rewriting every row.
 
 Avoid hashing all files in v1 because it is expensive. Add optional hashing later for duplicate detection.
 
@@ -219,6 +221,7 @@ Avoid hashing all files in v1 because it is expensive. Add optional hashing late
 
 Live content search should:
 
+- Select candidate files from the metadata index (SQL filter on extension, size, and root), never by re-walking the filesystem. This is the main payoff of having the metadata database — it avoids re-paying directory traversal on slow NAS disks for every search.
 - Respect filetype allowlist.
 - Respect max file size.
 - Respect ignored paths.
@@ -342,12 +345,15 @@ Even for home-only v1, design the API boundary with future security in mind.
 
 V1 minimum:
 
-- Optional shared token.
-- Token passed in `Authorization: Bearer <token>`.
+- Token auth on by default: if no token is configured, the node generates a random token on first run, persists it next to the database, and logs where to find it. Auth can be explicitly disabled (`auth_required: false`) for trusted networks.
+- Token passed in `Authorization: Bearer <token>` on every endpoint, including scan control.
+- `GET /v1/config` must redact the auth token.
 - Bind node to LAN interface or configured host.
 - Do not expose node API to the internet.
 - Do not allow arbitrary path reads through the API.
 - Only search configured roots.
+
+Rationale for default-on auth: mDNS advertisement plus an open API would let any device on the LAN (guest phones, IoT devices) enumerate every filename on the NAS, and trigger scans that burn NAS CPU. Filenames alone are sensitive.
 
 V2-ready design:
 
@@ -379,6 +385,9 @@ node:
   name: "MacBook Pro"
   listen_addr: "0.0.0.0:37373"
   advertise: true
+  # Auth is on by default. Leave auth_token empty to have the node generate
+  # a token on first run and persist it next to the database.
+  auth_required: true
   auth_token: ""
 
 database:
@@ -388,6 +397,11 @@ scan:
   interval: "6h"
   worker_count: 2
   follow_symlinks: false
+  tombstone_retention_days: 30
+  watch:
+    enabled: true
+    max_watched_dirs: 50000
+    debounce_ms: 500
 
 roots:
   - id: "home-documents"
@@ -408,7 +422,12 @@ roots:
       include_extensions:
         - ".txt"
         - ".md"
-        - ".pdf"
+        # Add ".pdf" only on roots where PDF extraction is deliberately enabled.
+
+content:
+  pdf:
+    enabled: false
+    pdftotext_path: ""  # auto-detect on PATH when enabled
 
 resource_limits:
   max_parallel_content_searches: 2
@@ -444,62 +463,59 @@ CREATE TABLE scan_roots (
   display_prefix TEXT NOT NULL,
   open_uri_prefix TEXT,
   enabled INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
 );
 ```
 
+All timestamps are INTEGER unix epoch seconds — cheaper to index and compare than TEXT.
+
 ### `files`
+
+Absolute path, display path, and open URIs are not stored per row — they are derived at response time from `scan_roots` plus `relative_path` (see section 5).
 
 ```sql
 CREATE TABLE files (
   id INTEGER PRIMARY KEY,
   root_id TEXT NOT NULL,
-  path TEXT NOT NULL,
   relative_path TEXT NOT NULL,
-  display_path TEXT NOT NULL,
-  open_uri TEXT,
-  parent_open_uri TEXT,
   filename TEXT NOT NULL,
   filename_lower TEXT NOT NULL,
   extension TEXT NOT NULL,
   size_bytes INTEGER NOT NULL,
-  modified_at TEXT,
-  created_at TEXT,
-  indexed_at TEXT NOT NULL,
-  last_seen_at TEXT NOT NULL,
+  modified_at INTEGER,
+  created_at INTEGER,
+  indexed_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
   last_seen_scan_id TEXT,
   is_deleted INTEGER NOT NULL DEFAULT 0,
+  deleted_at INTEGER,
   is_dir INTEGER NOT NULL DEFAULT 0,
   error TEXT,
-  UNIQUE(root_id, path)
+  UNIQUE(root_id, relative_path)
 );
 ```
 
-Indexes:
+Indexes — partial, because every search filters `is_deleted = 0` and a boolean index alone is near-useless:
 
 ```sql
-CREATE INDEX idx_files_filename_lower ON files(filename_lower);
-CREATE INDEX idx_files_extension ON files(extension);
-CREATE INDEX idx_files_root_id ON files(root_id);
-CREATE INDEX idx_files_modified_at ON files(modified_at);
+CREATE INDEX idx_files_filename_lower ON files(filename_lower) WHERE is_deleted = 0;
+CREATE INDEX idx_files_extension ON files(extension) WHERE is_deleted = 0;
+CREATE INDEX idx_files_root_id ON files(root_id) WHERE is_deleted = 0;
+CREATE INDEX idx_files_modified_at ON files(modified_at) WHERE is_deleted = 0;
 CREATE INDEX idx_files_last_seen_scan_id ON files(last_seen_scan_id);
-CREATE INDEX idx_files_deleted ON files(is_deleted);
 ```
 
-For substring filename search, evaluate:
-
-- `LIKE '%query%'` for v1 if row count is manageable.
-- SQLite trigram tokenizer in FTS5 if available.
-- Store filename/path in a small FTS table later.
+Substring filename search in v1 is `LIKE '%query%'`, which is a full table scan — the `filename_lower` index cannot help with a leading wildcard; it only serves exact/prefix lookups. At the expected scale (under ~2M rows per device) a scan costs at most hundreds of milliseconds, which is acceptable. Path-term matching uses `LOWER(relative_path) LIKE ...` in the same scan. If this proves too slow, move filenames/paths into an FTS5 table with the trigram tokenizer (SQLite >= 3.34, available in `modernc.org/sqlite`).
 
 ### `scan_runs`
 
 ```sql
 CREATE TABLE scan_runs (
   id TEXT PRIMARY KEY,
-  started_at TEXT NOT NULL,
-  finished_at TEXT,
+  root_id TEXT,  -- NULL = all roots; per-root scans come from the rescan button
+  started_at INTEGER NOT NULL,
+  finished_at INTEGER,
   status TEXT NOT NULL,
   files_seen INTEGER NOT NULL DEFAULT 0,
   files_updated INTEGER NOT NULL DEFAULT 0,
@@ -595,7 +611,7 @@ Response:
 POST /v1/search/content
 ```
 
-For v1, use newline-delimited JSON or Server-Sent Events so results can stream.
+Decision: stream newline-delimited JSON (NDJSON) over the POST response. SSE was considered, but browser `EventSource` only supports GET, which conflicts with the POST search body; NDJSON is simpler on both ends and cancellation is just closing the connection.
 
 Request:
 
@@ -653,6 +669,8 @@ V1 can start read-only through API:
 GET /v1/config
 ```
 
+The config response must redact `auth_token`.
+
 Add writes later:
 
 ```http
@@ -680,6 +698,8 @@ Example ranking:
 4. Extension/type filter match.
 5. Recently modified tie-breaker.
 
+Cross-node ranking: nodes return raw match signals (`match_type`, filename-vs-path hit, modified time) rather than an opaque score. The GUI ranks the combined result set globally, so results from different nodes are comparable and each node does not need to invent a compatible scoring scheme.
+
 ### Content Search
 
 Start simple:
@@ -703,6 +723,7 @@ Defaults should be conservative:
 - Scan interval: 6-24 hours.
 - Content search timeout: 60 seconds.
 - Max live content file size: 25 MB initially.
+- Tombstone retention: 30 days.
 - Exclude heavy directories by default, such as `.git`, `node_modules`, caches, system folders, app bundles, and backup directories.
 
 Use context cancellation throughout:
@@ -786,6 +807,7 @@ Deliverables:
 - Exclusion rules.
 - Insert/update file metadata.
 - Mark missing files deleted after reconciliation.
+- Filesystem watcher (fsnotify) with per-root watch budget and fallback to periodic scans.
 - CLI command to run a scan.
 - Basic tests for exclusion and path mapping.
 
@@ -821,6 +843,7 @@ Deliverables:
 - Node service metadata.
 - Config flag to enable/disable advertisement.
 - Simple discovery client command for testing.
+- Minimal CLI search client (discover + fan-out metadata search) so the system is usable end-to-end months before the GUI exists.
 
 Success criteria:
 
@@ -1013,23 +1036,20 @@ After that, add discovery and live content search. Then build the GUI once the n
 
 This avoids building a polished UI around unstable backend behavior.
 
-## 19. Open Decisions
+## 19. Decisions
 
-These can be decided during implementation:
+Resolved:
 
-- GUI stack: Tauri, Electron, or local web app.
-- SQLite driver: pure Go vs CGO.
-- PDF extraction strategy.
-- Whether filesystem watching is included in v1 or v1.1.
-- Whether metadata filename search should use basic SQL first or FTS/trigram early.
-- Exact auth/pairing UX.
-
-Recommended defaults:
-
-- GUI: Tauri if desktop polish matters, local web app if speed matters.
-- SQLite driver: start with pure Go if FTS5 support is acceptable.
+- SQLite driver: `modernc.org/sqlite` (pure Go; includes FTS5).
+- Content search streaming: NDJSON over POST.
+- Filesystem watching: in v1, on by default with a per-root watch budget; the reconciliation scan stays authoritative. Note that fsnotify on macOS uses kqueue, which consumes a file descriptor per watched item — budgets matter most there. FSEvents support can come later if needed.
+- Metadata filename search: plain SQL `LIKE` scan for v1. Confirmed scale is under ~2M files per device (computers 1–2 TB; NASes ~50 TB but mostly large media files, so file counts stay moderate).
+- Auth: shared token, generated automatically on first run; pairing later.
 - PDF: external `pdftotext` in Docker, optional on desktop.
-- Watching: v1.1, after periodic scan works.
-- Metadata search: simple SQL first, optimize once measured.
-- Auth: shared token in v1, pairing later.
+
+Still open:
+
+- GUI stack: Tauri, Electron, or local web app. The GUI is an ephemeral orchestrator — it may run on zero, one, or several devices at once, holds no authoritative state, and nodes must not assume a single coordinator. A local web app served by any node is worth considering for that reason.
+- Exact auth/pairing UX for V2.
+- Windows nodes: none on the network today, but likely later. Keep path handling behind `path/filepath`, and design `open_uri` so UNC paths (`\\server\share`) can be represented alongside `smb://`.
 
