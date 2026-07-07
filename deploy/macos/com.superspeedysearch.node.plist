@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Launchd agent: runs the node at login and restarts it if it dies.
+     Install:
+       cp deploy/macos/com.superspeedysearch.node.plist ~/Library/LaunchAgents/
+       (edit the two /usr/local/bin/sss-node paths if your binary lives elsewhere)
+       launchctl load ~/Library/LaunchAgents/com.superspeedysearch.node.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.superspeedysearch.node</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/sss-node</string>
+        <string>run</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/sss-node.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/sss-node.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>

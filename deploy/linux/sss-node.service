@@ -1,0 +1,23 @@
+# Systemd unit for the Super Speedy Search node.
+# Install (system-wide):
+#   sudo cp sss-node /usr/local/bin/
+#   sudo mkdir -p /etc/super-speedy-search && sudo cp config.yaml /etc/super-speedy-search/
+#   sudo cp deploy/linux/sss-node.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now sss-node
+[Unit]
+Description=Super Speedy Search node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/sss-node run -config /etc/super-speedy-search/config.yaml
+Restart=on-failure
+RestartSec=5
+# Run as a regular user so the index only sees what that user can read.
+# Change this to your username:
+User=orlando
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
