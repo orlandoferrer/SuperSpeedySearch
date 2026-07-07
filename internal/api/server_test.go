@@ -231,3 +231,25 @@ func TestUnknownRootScan(t *testing.T) {
 		t.Errorf("unknown root: status = %d, want 400", resp.StatusCode)
 	}
 }
+
+// Malformed JSON must be a 400, not a silent full scan; an empty body still
+// means "scan all roots".
+func TestScanBodyValidation(t *testing.T) {
+	ts, _ := newTestServer(t, "")
+	req, err := http.NewRequest("POST", ts.URL+"/v1/scan", strings.NewReader(`{"root_id": `))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("malformed JSON: status = %d, want 400", resp.StatusCode)
+	}
+	if resp := doJSON(t, "POST", ts.URL+"/v1/scan", "", nil); resp.StatusCode != http.StatusAccepted &&
+		resp.StatusCode != http.StatusConflict {
+		t.Errorf("empty body: status = %d, want 202 (or 409 if a scan is running)", resp.StatusCode)
+	}
+}

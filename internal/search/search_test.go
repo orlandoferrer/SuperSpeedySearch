@@ -1,6 +1,7 @@
 package search
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -165,6 +166,56 @@ func TestDirsExcludedByDefault(t *testing.T) {
 	}
 	if !foundDir {
 		t.Error("include_dirs did not return the directory")
+	}
+}
+
+// The row cap must never evict a high-class match in favor of more recent
+// low-class matches: ranking happens in SQL before LIMIT applies.
+func TestExactMatchSurvivesCap(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	now := time.Now().Unix()
+	var metas []db.FileMeta
+	// 20 recent path-only matches ("tax" appears only in the directory)...
+	for i := range 20 {
+		name := fmt.Sprintf("doc%02d.pdf", i)
+		metas = append(metas, db.FileMeta{
+			RootID: "r", RelativePath: "taxes/" + name, Filename: name,
+			Extension: ".pdf", ModifiedAt: now - int64(i),
+		})
+	}
+	// ...one OLD filename match and one even OLDER exact filename match.
+	metas = append(metas,
+		db.FileMeta{RootID: "r", RelativePath: "notes/tax-notes.txt", Filename: "tax-notes.txt",
+			Extension: ".txt", ModifiedAt: now - 100000},
+		db.FileMeta{RootID: "r", RelativePath: "archive/tax", Filename: "tax",
+			ModifiedAt: now - 200000},
+	)
+	if _, err := d.UpsertFiles(metas, "scan1", now); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := d.SearchMetadata(db.SearchFilter{Query: "tax", Terms: []string{"tax"}, Cap: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 5 {
+		t.Fatalf("got %d rows, want 5", len(rows))
+	}
+	if rows[0].Filename != "tax" || rows[0].Score != 3 {
+		t.Errorf("row 0 = %q (score %d), want exact match 'tax'", rows[0].Filename, rows[0].Score)
+	}
+	if rows[1].Filename != "tax-notes.txt" || rows[1].Score != 2 {
+		t.Errorf("row 1 = %q (score %d), want filename match 'tax-notes.txt'", rows[1].Filename, rows[1].Score)
+	}
+	for _, r := range rows[2:] {
+		if r.Score != 1 {
+			t.Errorf("trailing row %q score = %d, want 1", r.Filename, r.Score)
+		}
 	}
 }
 

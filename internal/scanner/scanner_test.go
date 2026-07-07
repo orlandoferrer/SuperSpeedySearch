@@ -147,6 +147,59 @@ func TestScanLifecycle(t *testing.T) {
 	}
 }
 
+// A root that disappears (unmounted disk/volume) must not tombstone its
+// previously indexed files.
+func TestUnavailableRootPreservesIndex(t *testing.T) {
+	d, cfg, dir := setup(t)
+	s := New(d, cfg, testLogger())
+	ctx := context.Background()
+
+	write(t, filepath.Join(dir, "a.txt"), "hello")
+	write(t, filepath.Join(dir, "b.txt"), "world")
+	if err := s.Run(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Root path gone entirely: stat preflight must keep the index.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Run(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, deleted, _ := fileState(t, d, "a.txt"); deleted {
+		t.Error("missing root tombstoned a.txt")
+	}
+	if s.Current().Status != "completed_with_errors" {
+		t.Errorf("scan status = %q, want completed_with_errors", s.Current().Status)
+	}
+
+	// Root present but empty (Docker bind mount vanished): the mass-delete
+	// guard must keep the index too.
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Run(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, deleted, _ := fileState(t, d, "a.txt"); deleted {
+		t.Error("empty root tombstoned a.txt")
+	}
+
+	// Once the root yields any entry again, normal reconciliation resumes:
+	// b.txt is genuinely gone now and must be tombstoned.
+	write(t, filepath.Join(dir, "a.txt"), "hello")
+	if err := s.Run(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if found, deleted, _ := fileState(t, d, "a.txt"); !found || deleted {
+		t.Error("a.txt should be live again")
+	}
+	if found, deleted, _ := fileState(t, d, "b.txt"); !found || !deleted {
+		t.Error("b.txt should be tombstoned once reconciliation resumes")
+	}
+}
+
 func TestExcluded(t *testing.T) {
 	excludes := []string{".git", "node_modules", "sub/private"}
 	cases := []struct {

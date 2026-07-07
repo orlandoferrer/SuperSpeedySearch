@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -174,8 +175,12 @@ func (s *Server) handleScanStart(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RootID string `json:"root_id"`
 	}
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&body) // empty body is fine
+	// An empty body means "scan everything", but malformed JSON must be
+	// rejected — silently ignoring it could run a full scan when the client
+	// believes it requested a single root.
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
 	}
 	if body.RootID != "" {
 		if _, ok := s.Cfg.RootByID(body.RootID); !ok {

@@ -199,6 +199,9 @@ func (w *Watcher) handle(absPath string) {
 	if info.Mode()&fs.ModeSymlink != 0 && !w.Cfg.Scan.FollowSymlinks {
 		return
 	}
+	if !scanner.ShouldIndexFile(rel, filepath.Base(absPath), root) {
+		return
+	}
 	meta := scanner.MetaFromInfo(root.ID, rel, info)
 	if _, err := w.DB.UpsertFiles([]db.FileMeta{meta}, "", time.Now().Unix()); err != nil {
 		w.Log.Warn("watcher upsert failed", "path", rel, "err", err)
@@ -216,8 +219,17 @@ func (w *Watcher) indexSubtree(root config.Root, dir string) {
 			return nil
 		}
 		relSlash := filepath.ToSlash(rel)
-		if d.IsDir() && path != dir && scanner.Excluded(relSlash, d.Name(), root.Excludes.Paths) {
-			return fs.SkipDir
+		if d.IsDir() {
+			if path != dir && scanner.Excluded(relSlash, d.Name(), root.Excludes.Paths) {
+				return fs.SkipDir
+			}
+		} else {
+			if !scanner.ShouldIndexFile(relSlash, d.Name(), root) {
+				return nil
+			}
+			if d.Type()&fs.ModeSymlink != 0 && !w.Cfg.Scan.FollowSymlinks {
+				return nil
+			}
 		}
 		meta, err := scanner.MetaFor(root.ID, relSlash, d)
 		if err != nil {

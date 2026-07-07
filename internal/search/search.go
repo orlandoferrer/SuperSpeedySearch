@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/url"
 	"path"
-	"sort"
 	"strings"
 	"time"
 
@@ -66,64 +65,40 @@ func (s *Searcher) Search(p Params) ([]Result, error) {
 		limit = s.Cfg.ResourceLimits.MaxResultsPerQuery
 	}
 
+	// Ranking happens in SQL (ORDER BY match class, then recency) so the row
+	// cap cannot evict a better match — see db.SearchMetadata.
 	rows, err := s.DB.SearchMetadata(db.SearchFilter{
+		Query:       query,
 		Terms:       terms,
 		Extensions:  normalizeExts(p.Extensions),
 		RootIDs:     p.RootIDs,
 		IncludeDirs: p.IncludeDirs,
-		Cap:         max(limit*4, 2000),
+		Cap:         limit,
 	})
 	if err != nil {
 		return nil, err
-	}
-
-	queryLower := strings.ToLower(query)
-	type scored struct {
-		row   db.FileRow
-		score int
-		match string
-	}
-	ranked := make([]scored, 0, len(rows))
-	for _, r := range rows {
-		match, score := classify(r, terms, queryLower)
-		ranked = append(ranked, scored{row: r, score: score, match: match})
-	}
-	sort.SliceStable(ranked, func(i, j int) bool {
-		if ranked[i].score != ranked[j].score {
-			return ranked[i].score > ranked[j].score
-		}
-		return ranked[i].row.ModifiedAt > ranked[j].row.ModifiedAt
-	})
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
 	}
 
 	roots := map[string]config.Root{}
 	for _, r := range s.Cfg.Roots {
 		roots[r.ID] = r
 	}
-	out := make([]Result, 0, len(ranked))
-	for _, sc := range ranked {
-		out = append(out, s.assemble(sc.row, roots[sc.row.RootID], sc.match))
+	out := make([]Result, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, s.assemble(r, roots[r.RootID], matchTypeForScore(r.Score)))
 	}
 	return out, nil
 }
 
-func classify(r db.FileRow, terms []string, queryLower string) (string, int) {
-	if r.FilenameLower == queryLower {
-		return MatchFilenameExact, 3
+func matchTypeForScore(score int) string {
+	switch score {
+	case 3:
+		return MatchFilenameExact
+	case 2:
+		return MatchFilename
+	default:
+		return MatchPath
 	}
-	allInFilename := true
-	for _, t := range terms {
-		if !strings.Contains(r.FilenameLower, t) {
-			allInFilename = false
-			break
-		}
-	}
-	if allInFilename {
-		return MatchFilename, 2
-	}
-	return MatchPath, 1
 }
 
 func (s *Searcher) assemble(row db.FileRow, root config.Root, matchType string) Result {

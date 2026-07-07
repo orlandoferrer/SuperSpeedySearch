@@ -6,8 +6,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -140,8 +142,16 @@ func (s *Scanner) finish(run db.ScanRun, status string) {
 }
 
 func (s *Scanner) scanRoot(ctx context.Context, root config.Root, scanID string, started time.Time, run *db.ScanRun) error {
+	// An unreachable root (unmounted disk, missing Docker volume) must never
+	// be treated as "everything was deleted": abort before reconciliation so
+	// the existing index is preserved.
+	if _, err := os.Stat(root.Path); err != nil {
+		return fmt.Errorf("root %q unavailable, keeping existing index: %w", root.ID, err)
+	}
+
 	batch := make([]db.FileMeta, 0, batchSize)
 	entries := 0
+	var rootSeen int64
 
 	flush := func() error {
 		res, err := s.DB.UpsertFiles(batch, scanID, time.Now().Unix())
@@ -183,10 +193,7 @@ func (s *Scanner) scanRoot(ctx context.Context, root config.Root, scanID string,
 				return fs.SkipDir
 			}
 		} else {
-			if Excluded(rel, d.Name(), root.Excludes.Paths) {
-				return nil
-			}
-			if extExcluded(d.Name(), root.Excludes.Extensions) {
+			if !ShouldIndexFile(rel, d.Name(), root) {
 				return nil
 			}
 			if !s.Cfg.Scan.FollowSymlinks && d.Type()&fs.ModeSymlink != 0 {
@@ -201,6 +208,7 @@ func (s *Scanner) scanRoot(ctx context.Context, root config.Root, scanID string,
 		}
 		batch = append(batch, meta)
 		run.FilesSeen++
+		rootSeen++
 		entries++
 		if len(batch) >= batchSize {
 			if err := flush(); err != nil {
@@ -221,6 +229,25 @@ func (s *Scanner) scanRoot(ctx context.Context, root config.Root, scanID string,
 	}
 	if err != nil {
 		return err
+	}
+
+	// Mass-delete guard: a root that previously had files but yielded zero
+	// entries this scan is far more likely an unmounted volume (a Docker bind
+	// mount can vanish into an empty-but-present directory, which the stat
+	// preflight cannot catch) than a user deleting everything. Skip delete
+	// reconciliation and keep the index; a later scan that sees any file
+	// resumes normal reconciliation.
+	if rootSeen == 0 {
+		existing, err := s.DB.CountFilesInRoot(root.ID)
+		if err != nil {
+			return err
+		}
+		if existing > 0 {
+			run.Errors++
+			s.Log.Warn("root yielded zero entries but has indexed files; skipping delete reconciliation (unmounted volume?)",
+				"root", root.ID, "previously_indexed", existing)
+			return nil
+		}
 	}
 
 	deleted, err := s.DB.MarkMissing(root.ID, scanID, started.Unix(), time.Now().Unix())
@@ -291,6 +318,15 @@ func Excluded(rel, name string, excludes []string) bool {
 		}
 	}
 	return false
+}
+
+// ShouldIndexFile is the single decision point for whether a regular file
+// belongs in the index under a root's exclude rules. Both the scanner and
+// the filesystem watcher must use it so they cannot disagree. Directories
+// use Excluded directly (extension excludes don't apply to them).
+func ShouldIndexFile(rel, name string, root config.Root) bool {
+	return !Excluded(rel, name, root.Excludes.Paths) &&
+		!extExcluded(name, root.Excludes.Extensions)
 }
 
 func extExcluded(name string, exts []string) bool {

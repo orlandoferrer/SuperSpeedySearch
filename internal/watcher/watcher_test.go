@@ -26,6 +26,7 @@ roots:
     path: "` + dir + `"
     excludes:
       paths: [".git"]
+      extensions: [".tmp"]
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -117,6 +118,50 @@ func TestWatcherLifecycle(t *testing.T) {
 	time.Sleep(300 * time.Millisecond) // give it a chance to (wrongly) index
 	if found, _ := rowState(d, ".git/config"); found {
 		t.Error(".git/config should have been excluded")
+	}
+}
+
+// Watcher events must respect the same exclude rules as the scanner:
+// excluded extensions and paths never enter the index, including files
+// inside a newly created directory (indexSubtree).
+func TestWatcherRespectsExcludes(t *testing.T) {
+	d, cfg, dir := setup(t)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	w := New(d, cfg, log)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := w.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Excluded extension via a direct file event.
+	if err := os.WriteFile(filepath.Join(dir, "junk.tmp"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// New directory containing a mix: only ok.txt may be indexed.
+	if err := os.MkdirAll(filepath.Join(dir, "pkg", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"pkg/ok.txt":      "fine",
+		"pkg/skip.tmp":    "excluded ext",
+		"pkg/.git/config": "excluded path",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	waitFor(t, "pkg/ok.txt indexed", func() bool {
+		found, deleted := rowState(d, "pkg/ok.txt")
+		return found && !deleted
+	})
+	// ok.txt arriving proves the subtree was processed; the excluded
+	// siblings must not have been indexed alongside it.
+	for _, rel := range []string{"junk.tmp", "pkg/skip.tmp", "pkg/.git/config"} {
+		if found, _ := rowState(d, rel); found {
+			t.Errorf("%s should have been excluded by the watcher", rel)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -299,6 +300,12 @@ func (d *DB) CountFiles() (int64, error) {
 	return n, err
 }
 
+func (d *DB) CountFilesInRoot(rootID string) (int64, error) {
+	var n int64
+	err := d.SQL.QueryRow(`SELECT COUNT(*) FROM files WHERE root_id = ? AND is_deleted = 0`, rootID).Scan(&n)
+	return n, err
+}
+
 // ScanRun is one row of scan history.
 type ScanRun struct {
 	ID           string `json:"id"`
@@ -361,7 +368,7 @@ func (d *DB) LastScanFinishedAt() (int64, error) {
 	return v.Int64, err
 }
 
-// FileRow is a metadata search hit before ranking and URI assembly.
+// FileRow is a metadata search hit before URI assembly.
 type FileRow struct {
 	RootID        string
 	RelativePath  string
@@ -371,26 +378,49 @@ type FileRow struct {
 	SizeBytes     int64
 	ModifiedAt    int64
 	IsDir         bool
+	// Score is the match class computed in SQL: 3 exact filename,
+	// 2 filename contains all terms, 1 path-only match.
+	Score int
 }
 
 // SearchFilter narrows a metadata search. Terms are matched with AND
 // semantics against filename or relative path.
 type SearchFilter struct {
+	Query       string // full query, for exact-filename scoring
 	Terms       []string
 	Extensions  []string
 	RootIDs     []string
 	IncludeDirs bool
-	Cap         int // maximum candidates fetched before ranking
+	Cap         int // maximum rows returned
 }
 
+// SearchMetadata scans for matches and orders them by match class in SQL,
+// so the row cap can never evict an exact filename match in favor of a
+// merely more recent path match.
 func (d *DB) SearchMetadata(f SearchFilter) ([]FileRow, error) {
+	if len(f.Terms) == 0 {
+		return nil, errors.New("search terms required")
+	}
 	if f.Cap <= 0 {
 		f.Cap = 2000
 	}
+
+	// Score expression args come first: they appear in the SELECT list,
+	// before the WHERE clause, and SQLite binds positionally.
+	var termConds []string
+	scoreArgs := []any{strings.ToLower(strings.TrimSpace(f.Query))}
+	for _, t := range f.Terms {
+		termConds = append(termConds, `filename_lower LIKE ? ESCAPE '\'`)
+		scoreArgs = append(scoreArgs, "%"+EscapeLike(strings.ToLower(t))+"%")
+	}
+	scoreExpr := `CASE WHEN filename_lower = ? THEN 3 WHEN ` +
+		strings.Join(termConds, " AND ") + ` THEN 2 ELSE 1 END`
+
 	var (
 		where []string
 		args  []any
 	)
+	args = append(args, scoreArgs...)
 	where = append(where, "is_deleted = 0")
 	if !f.IncludeDirs {
 		where = append(where, "is_dir = 0")
@@ -417,9 +447,9 @@ func (d *DB) SearchMetadata(f SearchFilter) ([]FileRow, error) {
 	args = append(args, f.Cap)
 	rows, err := d.SQL.Query(`
 		SELECT root_id, relative_path, filename, filename_lower, extension, size_bytes,
-		       COALESCE(modified_at, 0), is_dir
+		       COALESCE(modified_at, 0), is_dir, `+scoreExpr+` AS score
 		FROM files WHERE `+strings.Join(where, " AND ")+`
-		ORDER BY modified_at DESC LIMIT ?`, args...)
+		ORDER BY score DESC, modified_at DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -429,7 +459,7 @@ func (d *DB) SearchMetadata(f SearchFilter) ([]FileRow, error) {
 		var r FileRow
 		var isDir int
 		if err := rows.Scan(&r.RootID, &r.RelativePath, &r.Filename, &r.FilenameLower,
-			&r.Extension, &r.SizeBytes, &r.ModifiedAt, &isDir); err != nil {
+			&r.Extension, &r.SizeBytes, &r.ModifiedAt, &isDir, &r.Score); err != nil {
 			return nil, err
 		}
 		r.IsDir = isDir != 0
