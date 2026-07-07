@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Super Speedy Search</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <form id="search-form">
+      <input id="query" type="text" placeholder="Search files across your devices…" autocomplete="off" autofocus />
+      <div id="mode" class="segmented" role="tablist">
+        <button type="button" class="seg active" data-mode="names">Names</button>
+        <button type="button" class="seg" data-mode="contents">Contents</button>
+      </div>
+      <button id="search-btn" type="submit">Search</button>
+      <button id="cancel-btn" type="button" class="danger hidden">Cancel</button>
+    </form>
+  </header>
+
+  <div id="layout">
+    <aside id="sidebar">
+      <div class="side-head">
+        <h2>Nodes</h2>
+        <div class="side-actions">
+          <button id="refresh-nodes" title="Rediscover nodes">↻</button>
+          <button id="add-node" title="Add node by URL">+</button>
+        </div>
+      </div>
+      <ul id="node-list"><li class="empty">Discovering…</li></ul>
+      <div class="side-foot">
+        <button id="default-token" class="linkish">Set default token…</button>
+      </div>
+    </aside>
+
+    <main id="main">
+      <div id="filters">
+        <label>Types <input id="ext-filter" type="text" placeholder=".pdf, .txt" size="12" /></label>
+        <label>Limit <input id="limit" type="number" value="100" min="1" max="500" /></label>
+        <span id="status" class="status">Ready</span>
+      </div>
+      <div id="results">
+        <div class="empty-state">
+          <p>Search filenames and paths across every node, or switch to
+          <strong>Contents</strong> to grep inside files live.</p>
+        </div>
+      </div>
+      <div id="summary" class="hidden"></div>
+    </main>
+  </div>
+
+  <!-- minimal modal: WKWebView has no working window.prompt -->
+  <div id="modal-backdrop" class="hidden">
+    <div id="modal">
+      <h3 id="modal-title"></h3>
+      <p id="modal-desc"></p>
+      <input id="modal-input" type="text" autocomplete="off" />
+      <div class="modal-actions">
+        <button id="modal-cancel">Cancel</button>
+        <button id="modal-ok" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>

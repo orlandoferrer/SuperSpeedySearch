@@ -1047,9 +1047,10 @@ Resolved:
 - Auth: shared token, generated automatically on first run; pairing later.
 - PDF: external `pdftotext` in Docker, optional on desktop.
 
+- GUI stack: Wails v2 (Go backend + OS webview). Chosen over Tauri (would duplicate discovery/client logic in Rust), Electron (heavy runtime), and Swift (macOS-only, slow iteration). The GUI imports the node's `internal/client`, `internal/discovery`, and `internal/search` packages directly, so the wire format and ranking have one definition. It remains an ephemeral orchestrator — it may run on zero, one, or several devices at once, holds no authoritative state, and nodes must not assume a single coordinator.
+
 Still open:
 
-- GUI stack: Tauri, Electron, or local web app. The GUI is an ephemeral orchestrator — it may run on zero, one, or several devices at once, holds no authoritative state, and nodes must not assume a single coordinator. A local web app served by any node is worth considering for that reason.
 - Exact auth/pairing UX for V2.
 - Windows nodes: none on the network today, but likely later. Keep path handling behind `path/filepath`, and design `open_uri` so UNC paths (`\\server\share`) can be represented alongside `smb://`.
 

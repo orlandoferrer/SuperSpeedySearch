@@ -6,3 +6,4 @@
 auth_token
 .DS_Store
 deploy/synology/data/
+gui/build/

@@ -8,7 +8,8 @@ the **[User Manual](docs/USER_MANUAL.md)** for detailed setup on macOS,
 Linux, and Synology, the full CLI/API reference, and troubleshooting.
 
 Status: node implemented (metadata index, filesystem watching, live content
-search, mDNS discovery, CLI client). GUI not started yet.
+search, mDNS discovery, CLI client), plus a Wails desktop GUI prototype in
+[gui/](gui/).
 
 ## Quick start (macOS/Linux)
 
@@ -44,6 +45,22 @@ sss-node discover                 # list nodes advertised on the LAN
 SSS_TOKEN=... sss-node search tax # fan-out search across discovered nodes
 sss-node search -node http://synology.local:37373 -token T -ext .pdf tax 2024
 ```
+
+## Desktop GUI
+
+A Wails (Go + system webview) desktop app lives in `gui/`: node discovery,
+token management, fan-out filename search, and streaming deep search.
+
+```sh
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+cd gui && wails dev      # live-reload development
+cd gui && wails build    # produces build/bin/SuperSpeedySearch.app
+```
+
+Without the wails CLI, a plain binary also works:
+`go build -tags desktop,production ./gui`. The frontend is dependency-free
+vanilla JS (no npm); opening `gui/frontend/dist` in a browser runs it with
+demo data.
 
 ## Synology / Docker
 

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "SuperSpeedySearch",
+  "outputfilename": "SuperSpeedySearch",
+  "assetdir": "frontend/dist",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "Orlando Ferrer"
+  }
+}

@@ -14,8 +14,9 @@ Contents:
 7. [CLI reference](#7-cli-reference)
 8. [Searching](#8-searching)
 9. [HTTP API reference](#9-http-api-reference)
-10. [Troubleshooting](#10-troubleshooting)
-11. [Resetting and uninstalling](#11-resetting-and-uninstalling)
+10. [The desktop GUI](#10-the-desktop-gui)
+11. [Troubleshooting](#11-troubleshooting)
+12. [Resetting and uninstalling](#12-resetting-and-uninstalling)
 
 ---
 
@@ -103,7 +104,7 @@ Start from [config.example.yaml](../config.example.yaml). Every key:
 | `roots[].content_search.enabled` | `false` | Allow live content ("deep") search inside this root. |
 | `roots[].content_search.max_file_size_mb` | `25` | Skip files bigger than this during content search. |
 | `roots[].content_search.include_extensions` | none | Only these types are content-searched, e.g. `[".txt", ".md", ".csv", ".json"]`. |
-| `content.pdf.enabled` | `false` | Enable PDF text extraction (needs `pdftotext`; see section 10). |
+| `content.pdf.enabled` | `false` | Enable PDF text extraction (needs `pdftotext`; see section 11). |
 | `content.pdf.pdftotext_path` | auto | Explicit path to `pdftotext` if not on `PATH`. |
 | `resource_limits.max_parallel_content_searches` | `2` | Concurrent deep searches the node accepts (extras get HTTP 429). |
 | `resource_limits.max_search_seconds` | `60` | Hard time limit for one content search. |
@@ -412,7 +413,52 @@ The node's effective configuration with the auth token redacted.
 
 ---
 
-## 10. Troubleshooting
+## 10. The desktop GUI
+
+The `gui/` directory contains a desktop app built with
+[Wails](https://wails.io) (Go backend, system webview — no Electron).
+
+### Building
+
+```sh
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+cd gui
+wails build        # → gui/build/bin/SuperSpeedySearch.app (macOS)
+wails dev          # development mode with live reload
+```
+
+No npm needed: the frontend is plain HTML/CSS/JS with no build step. A plain
+Go binary also works without the wails CLI:
+
+```sh
+go build -tags desktop,production -o SuperSpeedySearch ./gui
+```
+
+### Using it
+
+- **Nodes sidebar** — nodes found via mDNS appear automatically; use **+** to
+  add one by URL (VPN/other subnets). Checkboxes choose which nodes a search
+  fans out to. Hover a node for actions: set its token (🔑), trigger a rescan
+  (↻), remove a manual node (✕).
+- **Tokens** — a node showing *needs token* in red rejected the GUI. Paste
+  its token via 🔑, or use *Set default token…* (bottom left) if all your
+  nodes share one token.
+- **Names mode** — filename/path search across the selected nodes, globally
+  ranked, with type filters and a result limit.
+- **Contents mode** — live deep search; matches stream in as they're found,
+  with highlighted snippets and line numbers. Esc or **Cancel** stops it. The
+  bar at the bottom reports files searched/skipped per the nodes' summaries.
+- **Row actions** (hover a result) — *Copy* the full path, *Open* the result
+  URI (`smb://` mounts the share; `file://` opens locally), *Reveal* shows a
+  local file in Finder.
+- ⌘F focuses the search box.
+
+GUI settings (manual nodes, tokens) live in
+`~/Library/Application Support/SuperSpeedySearch/gui.json` on macOS,
+`~/.config/SuperSpeedySearch/gui.json` on Linux. The file is user-readable
+only (0600) since it contains tokens.
+
+## 11. Troubleshooting
 
 ### "401 unauthorized" / missing or invalid bearer token
 
@@ -508,7 +554,7 @@ including indexes. Deleted files are kept (tombstoned) for
 
 ---
 
-## 11. Resetting and uninstalling
+## 12. Resetting and uninstalling
 
 **Reset the index** (e.g. after big config changes): stop the node, delete
 `index.db`, `index.db-wal`, `index.db-shm` (keep `auth_token` to keep the
