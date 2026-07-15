@@ -32,6 +32,9 @@ type Server struct {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	// All node behavior is exposed through versioned /v1 routes. Keeping the
+	// API small and JSON-based makes it easy to test with curl and easy for the
+	// desktop GUI, CLI, or future mobile/web clients to share.
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
 	mux.HandleFunc("GET /v1/roots", s.handleRoots)
 	mux.HandleFunc("POST /v1/search/metadata", s.handleMetadataSearch)
@@ -51,6 +54,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		// ConstantTimeCompare avoids leaking how many prefix characters matched.
+		// That is a small thing on a home LAN, but cheap and correct.
 		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
 			writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
 			return
@@ -151,6 +156,9 @@ func (s *Server) handleContentSearch(w http.ResponseWriter, r *http.Request) {
 	flusher, _ := w.(http.Flusher)
 	enc := json.NewEncoder(w)
 	emit := func(ev content.Event) error {
+		// NDJSON is one JSON object per line. It lets clients display matches as
+		// soon as each file is searched instead of waiting for the whole deep
+		// search to finish.
 		if err := enc.Encode(ev); err != nil {
 			return err
 		}

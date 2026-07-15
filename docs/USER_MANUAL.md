@@ -6,17 +6,18 @@ search node on every supported device type, plus the CLI and HTTP API.
 Contents:
 
 1. [How it works](#1-how-it-works)
-2. [Building the binary](#2-building-the-binary)
-3. [Configuration reference](#3-configuration-reference)
-4. [Running on macOS](#4-running-on-macos)
-5. [Running on Linux](#5-running-on-linux)
-6. [Running on Synology NAS (Docker)](#6-running-on-synology-nas-docker)
-7. [CLI reference](#7-cli-reference)
-8. [Searching](#8-searching)
-9. [HTTP API reference](#9-http-api-reference)
-10. [The desktop GUI](#10-the-desktop-gui)
-11. [Troubleshooting](#11-troubleshooting)
-12. [Resetting and uninstalling](#12-resetting-and-uninstalling)
+2. [Running on multiple machines](#2-running-on-multiple-machines)
+3. [Building the binary](#3-building-the-binary)
+4. [Configuration reference](#4-configuration-reference)
+5. [Running on macOS](#5-running-on-macos)
+6. [Running on Linux](#6-running-on-linux)
+7. [Running on Synology NAS (Docker)](#7-running-on-synology-nas-docker)
+8. [CLI reference](#8-cli-reference)
+9. [Searching](#9-searching)
+10. [HTTP API reference](#10-http-api-reference)
+11. [The desktop GUI](#11-the-desktop-gui)
+12. [Troubleshooting](#12-troubleshooting)
+13. [Resetting and uninstalling](#13-resetting-and-uninstalling)
 
 ---
 
@@ -44,9 +45,133 @@ and saved to a file named `auth_token` next to the database.
 
 ---
 
-## 2. Building the binary
+## 2. Running on multiple machines
 
-Requires Go 1.24+ (https://go.dev/dl). From the repository root:
+The important mental model is: **run one node everywhere you want to search**.
+There is no central index. Your Mac indexes the Mac paths it can read, a Linux
+box indexes its local paths, and a Synology container indexes the NAS shares
+mounted into that container.
+
+### Recommended rollout
+
+1. Pick one machine as your first client, usually your main Mac.
+2. Build `sss-node` once, or build the Docker image for Synology.
+3. Install/start a node on each searchable device.
+4. Give each node a unique `node.id`, for example:
+   - `orlando-macbook`
+   - `office-imac`
+   - `synology-main`
+5. Configure roots that make sense from that node's point of view.
+6. Start every node and confirm each one reports `/v1/status`.
+7. Discover nodes from your client with `sss-node discover`.
+8. Search across them with the CLI or desktop GUI.
+
+### Example fleet
+
+MacBook node:
+
+```yaml
+node:
+  id: "orlando-macbook"
+  name: "Orlando MacBook"
+roots:
+  - id: "documents"
+    path: "/Users/orlando/Documents"
+    display_prefix: "MacBook:Documents"
+    open_uri_prefix: "file:///Users/orlando/Documents"
+```
+
+Synology Docker node:
+
+```yaml
+node:
+  id: "synology-main"
+  name: "Synology"
+roots:
+  - id: "documents"
+    path: "/mnt/documents"              # path inside the container
+    display_prefix: "Synology:Documents"
+    open_uri_prefix: "smb://synology.local/documents"
+```
+
+The `path` is where the node reads files. The `open_uri_prefix` is what a
+desktop client can hand to the operating system when you choose "open". Those
+are often the same on a Mac, but intentionally different in Docker.
+
+### Tokens across machines
+
+By default, every node generates its own token. That is safest because each
+node is independently protected, and the desktop GUI can store a token per
+node.
+
+For CLI fan-out search, using the same token on all home nodes is simpler:
+
+```yaml
+node:
+  auth_required: true
+  auth_token: "choose-a-long-random-shared-token"
+```
+
+Then search from any client with:
+
+```sh
+export SSS_TOKEN=choose-a-long-random-shared-token
+sss-node search tax 2024
+```
+
+If nodes use different tokens, use the desktop GUI or query nodes one at a
+time with `-node` and `-token`.
+
+### Discovery and firewalls
+
+Nodes advertise over mDNS/Bonjour as `_superspeedysearch._tcp.local`. This is
+convenient on a flat home LAN, but it can fail across Docker bridge networks,
+guest Wi-Fi, VLANs, VPNs, or stricter firewalls.
+
+Check discovery:
+
+```sh
+sss-node discover
+```
+
+If discovery fails but you know the node IP or hostname, search manually:
+
+```sh
+sss-node search \
+  -node http://192.168.1.25:37373 \
+  -node http://192.168.1.40:37373 \
+  -token "$SSS_TOKEN" \
+  invoice 2024
+```
+
+Each node must allow inbound TCP connections on port `37373`. On macOS this
+usually means allowing `sss-node` through the firewall. On Synology Docker,
+`network_mode: host` is recommended for mDNS; otherwise publish port `37373`
+and add the node manually.
+
+### Sanity checks
+
+On each node:
+
+```sh
+sss-node run -config /path/to/config.yaml
+```
+
+From another machine:
+
+```sh
+curl -H "Authorization: Bearer $SSS_TOKEN" http://<node-host>:37373/v1/status
+curl -H "Authorization: Bearer $SSS_TOKEN" http://<node-host>:37373/v1/roots
+```
+
+Once status works for each node, search fan-out is just the client asking all
+of those node URLs concurrently and merging the responses.
+
+---
+
+## 3. Building the binary
+
+Requires Go 1.26+ (https://go.dev/dl). From the repository root:
 
 ```sh
 go build -o sss-node ./cmd/sss-node
@@ -61,11 +186,11 @@ GOOS=linux   GOARCH=amd64 go build -o dist/sss-node-linux      ./cmd/sss-node  #
 GOOS=linux   GOARCH=arm64 go build -o dist/sss-node-linux-arm  ./cmd/sss-node  # ARM NAS/Pi
 ```
 
-For Synology you normally build the Docker image instead (section 6).
+For Synology you normally build the Docker image instead (section 7).
 
 ---
 
-## 3. Configuration reference
+## 4. Configuration reference
 
 Each node reads one YAML file. The node looks for it in this order:
 
@@ -104,7 +229,7 @@ Start from [config.example.yaml](../config.example.yaml). Every key:
 | `roots[].content_search.enabled` | `false` | Allow live content ("deep") search inside this root. |
 | `roots[].content_search.max_file_size_mb` | `25` | Skip files bigger than this during content search. |
 | `roots[].content_search.include_extensions` | none | Only these types are content-searched, e.g. `[".txt", ".md", ".csv", ".json"]`. |
-| `content.pdf.enabled` | `false` | Enable PDF text extraction (needs `pdftotext`; see section 11). |
+| `content.pdf.enabled` | `false` | Enable PDF text extraction (needs `pdftotext`; see section 12). |
 | `content.pdf.pdftotext_path` | auto | Explicit path to `pdftotext` if not on `PATH`. |
 | `resource_limits.max_parallel_content_searches` | `2` | Concurrent deep searches the node accepts (extras get HTTP 429). |
 | `resource_limits.max_search_seconds` | `60` | Hard time limit for one content search. |
@@ -114,7 +239,7 @@ Config changes require a node restart.
 
 ---
 
-## 4. Running on macOS
+## 5. Running on macOS
 
 ### First run
 
@@ -166,7 +291,7 @@ otherwise other devices cannot query this node.
 
 ---
 
-## 5. Running on Linux
+## 6. Running on Linux
 
 ### First run
 
@@ -208,7 +333,7 @@ Also raise `scan.watch.max_watched_dirs` in the node config to match.
 
 ---
 
-## 6. Running on Synology NAS (Docker)
+## 7. Running on Synology NAS (Docker)
 
 ### Build (or load) the image
 
@@ -260,7 +385,7 @@ Notes:
 
 ---
 
-## 7. CLI reference
+## 8. CLI reference
 
 One binary, four commands. Global pattern: `sss-node <command> [flags]`.
 
@@ -270,7 +395,7 @@ Runs the daemon: API server, mDNS advertisement, watcher, periodic scans.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `-config path` | auto-detected (section 3) | Config file to use. |
+| `-config path` | auto-detected (section 4) | Config file to use. |
 
 ### `sss-node scan`
 
@@ -322,7 +447,7 @@ Everything after the flags is the query; multiple words must all match
 
 ---
 
-## 8. Searching
+## 9. Searching
 
 ```sh
 export SSS_TOKEN=<your token>
@@ -335,13 +460,13 @@ sss-node search -node http://192.168.1.40:37373 -limit 100 invoice
 Ranking: exact filename matches first, then filenames containing all terms,
 then path-only matches; ties broken by most recently modified.
 
-Content ("deep") search is available over the API today (section 9) and in
+Content ("deep") search is available over the API today (section 10) and in
 the upcoming GUI; it greps inside files of the types allowed by each root's
 `content_search` config, live, without a content index.
 
 ---
 
-## 9. HTTP API reference
+## 10. HTTP API reference
 
 All endpoints need `Authorization: Bearer <token>` unless the node has
 `auth_required: false`. Base URL: `http://<node>:37373`.
@@ -413,7 +538,7 @@ The node's effective configuration with the auth token redacted.
 
 ---
 
-## 10. The desktop GUI
+## 11. The desktop GUI
 
 The `gui/` directory contains a desktop app built with
 [Wails](https://wails.io) (Go backend, system webview — no Electron).
@@ -458,7 +583,7 @@ GUI settings (manual nodes, tokens) live in
 `~/.config/SuperSpeedySearch/gui.json` on Linux. The file is user-readable
 only (0600) since it contains tokens.
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 ### "401 unauthorized" / missing or invalid bearer token
 
@@ -489,7 +614,7 @@ not `127.0.0.1`.
 
 ### Scan finds far fewer files than expected (macOS)
 
-Grant Full Disk Access (section 4). The scan doesn't fail — macOS silently
+Grant Full Disk Access (section 5). The scan doesn't fail — macOS silently
 returns permission errors for protected folders, which show up as `errors`
 in `/v1/scan/history`.
 
@@ -501,7 +626,7 @@ item). The node still works; freshness just falls back to the periodic scan.
 Options:
 
 - raise `scan.watch.max_watched_dirs` (Linux: also raise the inotify sysctl,
-  section 5; macOS: raise `ulimit -n`),
+  section 6; macOS: raise `ulimit -n`),
 - add excludes for huge subtrees you don't care about,
 - or lower `scan.interval` (e.g. `30m`) and accept scan-based freshness.
 
@@ -554,7 +679,7 @@ including indexes. Deleted files are kept (tombstoned) for
 
 ---
 
-## 12. Resetting and uninstalling
+## 13. Resetting and uninstalling
 
 **Reset the index** (e.g. after big config changes): stop the node, delete
 `index.db`, `index.db-wal`, `index.db-shm` (keep `auth_token` to keep the

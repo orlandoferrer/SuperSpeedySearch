@@ -67,6 +67,9 @@ func (s *Scanner) Current() Status {
 // Run scans all enabled roots, or just rootID when non-empty. Only one scan
 // runs at a time; concurrent calls get ErrScanRunning.
 func (s *Scanner) Run(ctx context.Context, rootID string) error {
+	// The scanner mutates shared state and writes many database rows, so only
+	// one scan is allowed per node. API-triggered scans and scheduled scans all
+	// pass through this same gate.
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
@@ -98,6 +101,8 @@ func (s *Scanner) Run(ctx context.Context, rootID string) error {
 
 	status := "completed"
 	for _, root := range roots {
+		// Each root is reconciled independently. If one NAS share is offline,
+		// other roots can still scan and remain fresh.
 		if err := s.scanRoot(ctx, root, scanID, started, &run); err != nil {
 			if ctx.Err() != nil {
 				status = "cancelled"
@@ -154,6 +159,8 @@ func (s *Scanner) scanRoot(ctx context.Context, root config.Root, scanID string,
 	var rootSeen int64
 
 	flush := func() error {
+		// SQLite is much happier with batched writes than one transaction per
+		// file. A batch of 500 keeps memory low but avoids excessive commits.
 		res, err := s.DB.UpsertFiles(batch, scanID, time.Now().Unix())
 		if err != nil {
 			return err
@@ -189,6 +196,8 @@ func (s *Scanner) scanRoot(ctx context.Context, root config.Root, scanID string,
 		rel = filepath.ToSlash(rel)
 
 		if d.IsDir() {
+			// Directories are indexed too, but extension excludes only apply to
+			// files. Returning fs.SkipDir tells WalkDir not to descend further.
 			if Excluded(rel, d.Name(), root.Excludes.Paths) {
 				return fs.SkipDir
 			}
@@ -216,6 +225,9 @@ func (s *Scanner) scanRoot(ctx context.Context, root config.Root, scanID string,
 			}
 		}
 		if entries%throttleEvery == 0 {
+			// This tiny sleep is deliberate: scans should be background-friendly
+			// on NAS devices and laptops, even if that means initial indexing is
+			// not the absolute fastest possible walk.
 			select {
 			case <-time.After(throttleSleep):
 			case <-ctx.Done():
@@ -303,6 +315,8 @@ func Excluded(rel, name string, excludes []string) bool {
 			continue
 		}
 		if strings.Contains(e, "/") {
+			// "Photos/cache" means the named subtree from the root, while a bare
+			// name like "node_modules" matches that segment anywhere below root.
 			if rel == e || strings.HasPrefix(rel, e+"/") {
 				return true
 			}

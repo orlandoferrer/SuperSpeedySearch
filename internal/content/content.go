@@ -81,6 +81,9 @@ type Searcher struct {
 
 // Search streams events to emit. emit is called from one goroutine at a time.
 func (s *Searcher) Search(ctx context.Context, req Request, emit func(Event) error) error {
+	// A semaphore is a buffered channel used here as a small "permit" pool.
+	// If all permits are taken, the node rejects the request with ErrBusy
+	// instead of letting many deep searches compete for disk and CPU.
 	s.semOnce.Do(func() {
 		s.sem = make(chan struct{}, s.Cfg.ResourceLimits.MaxParallelContentSearches)
 	})
@@ -118,6 +121,9 @@ func (s *Searcher) Search(ctx context.Context, req Request, emit func(Event) err
 		emitMu   sync.Mutex
 	)
 	emitResult := func(r Result) error {
+		// Worker goroutines may find matches at the same time, but the HTTP
+		// response is a single NDJSON stream. The mutex keeps event writes
+		// ordered and prevents interleaved JSON.
 		emitMu.Lock()
 		defer emitMu.Unlock()
 		if emitted.Load() >= int64(limit) {
@@ -142,6 +148,9 @@ func (s *Searcher) Search(ctx context.Context, req Request, emit func(Event) err
 	workers := min(s.Cfg.ResourceLimits.MaxParallelContentSearches, 2)
 	var wg sync.WaitGroup
 	for range workers {
+		// Producer/consumer shape: the producer below lists candidate files from
+		// SQLite; these workers open files and search their contents. Keeping the
+		// worker count low is intentional for NAS-friendly behavior.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -214,6 +223,9 @@ func (s *Searcher) searchFile(ctx context.Context, root config.Root, c db.Candid
 
 	var reader io.ReadCloser
 	if c.Extension == ".pdf" {
+		// PDFs are handled through an extractor so the rest of the search code
+		// can treat "PDF text" and "plain file text" the same way: as a reader
+		// that yields lines.
 		if s.PDF == nil {
 			return 0, errSkipped
 		}
@@ -230,6 +242,8 @@ func (s *Searcher) searchFile(ctx context.Context, root config.Root, c db.Candid
 		buf := make([]byte, sniffBytes)
 		n, _ := io.ReadFull(f, buf)
 		if bytes.IndexByte(buf[:n], 0) >= 0 {
+			// A NUL byte near the start is a cheap binary-file signal. It keeps
+			// live content search from dumping arbitrary binary data into snippets.
 			f.Close()
 			return 0, errSkipped // binary
 		}
@@ -333,6 +347,8 @@ func effectiveExtensions(root config.Root, requested []string, pdfEnabled bool) 
 	allowed := root.ContentSearch.IncludeExtensions
 	var out []string
 	for _, e := range allowed {
+		// A request can only narrow a root's configured allowlist; it cannot
+		// search file types the node owner did not opt in to.
 		if e == ".pdf" && !pdfEnabled {
 			continue
 		}

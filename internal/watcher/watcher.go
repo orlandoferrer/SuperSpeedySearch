@@ -48,6 +48,9 @@ func (w *Watcher) Start(ctx context.Context) error {
 	w.fsw = fsw
 
 	for _, root := range w.Cfg.EnabledRoots() {
+		// fsnotify watches directories, not whole recursive trees. We add every
+		// existing directory up front and add newly-created directories later in
+		// handle().
 		if err := w.addRecursive(root, root.Path); err != nil {
 			w.disableRoot(root, err)
 		}
@@ -128,6 +131,9 @@ func (w *Watcher) loop(ctx context.Context) {
 			if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) == 0 {
 				continue
 			}
+			// Editors often save by writing temp files, renaming, and touching
+			// directories in quick bursts. Store the latest event time and let
+			// flush process the stable path after the debounce window.
 			w.mu.Lock()
 			w.pending[ev.Name] = time.Now()
 			w.mu.Unlock()
@@ -178,7 +184,8 @@ func (w *Watcher) handle(absPath string) {
 
 	info, err := os.Lstat(absPath)
 	if err != nil {
-		// gone: tombstone the path and any children
+		// Gone: tombstone the path and any children. The periodic scanner will
+		// later confirm the state, but this makes deletes disappear quickly.
 		if n, err := w.DB.MarkDeletedByPath(root.ID, rel, time.Now().Unix()); err != nil {
 			w.Log.Warn("watcher delete failed", "path", rel, "err", err)
 		} else if n > 0 {
@@ -235,6 +242,8 @@ func (w *Watcher) indexSubtree(root config.Root, dir string) {
 		if err != nil {
 			return nil
 		}
+		// A moved-in directory can contain many files. Batch the subtree into a
+		// single write so the watcher does not do one SQLite transaction per file.
 		batch = append(batch, meta)
 		return nil
 	})

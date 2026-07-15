@@ -32,6 +32,10 @@ import (
 const version = "0.1.0"
 
 func main() {
+	// This CLI intentionally has no external command framework. The binary has
+	// only a few commands, so a small hand-rolled dispatcher keeps startup easy
+	// to follow: the first non-flag argument is the command, and "run" is the
+	// default when no command is provided.
 	args := os.Args[1:]
 	cmd := "run"
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -80,6 +84,9 @@ Search flags:
 }
 
 func defaultConfigPath() string {
+	// Configuration is local to each node. The search GUI talks to nodes over
+	// HTTP, but it does not own their scan roots or indexes, so every machine
+	// can be installed and tuned independently.
 	if p := os.Getenv("SSS_CONFIG"); p != "" {
 		return p
 	}
@@ -144,9 +151,16 @@ func cmdRun(args []string) error {
 		return fmt.Errorf("sync roots: %w", err)
 	}
 
+	// A context is Go's standard cancellation signal. When the process gets
+	// Ctrl-C or SIGTERM, this context is cancelled and long-running pieces
+	// (HTTP server, scanner, watcher, mDNS advertiser) can shut down together.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The daemon wires together small packages instead of putting all behavior
+	// in main: db owns SQLite, scanner owns reconciliation, search/content
+	// answer queries, api exposes HTTP, discovery exposes mDNS, and watcher is
+	// only a fast-update helper.
 	scn := scanner.New(database, cfg, log)
 	pdf, err := content.NewPDFExtractor(cfg.Content.PDF)
 	if err != nil {
@@ -172,6 +186,9 @@ func cmdRun(args []string) error {
 	}()
 
 	if cfg.Node.AdvertiseOn() {
+		// mDNS/Bonjour is a convenience for same-LAN discovery. Manual node URLs
+		// still work when mDNS is blocked by Docker networking, VLANs, VPNs, or
+		// firewalls.
 		if err := discovery.Advertise(ctx, cfg.Node.ID, cfg.Node.Name, cfg.Node.ListenAddr, version, cfg.Node.AuthRequiredOn()); err != nil {
 			log.Warn("mdns advertisement failed; manual node URLs still work", "err", err)
 		} else {
@@ -180,13 +197,18 @@ func cmdRun(args []string) error {
 	}
 
 	if cfg.Scan.Watch.EnabledOn() {
+		// File watchers are treated as an acceleration layer only. The periodic
+		// scanner below remains the source of truth because network mounts,
+		// Docker bind mounts, and sleep/wake cycles can all drop events.
 		w := watcher.New(database, cfg, log)
 		if err := w.Start(ctx); err != nil {
 			log.Warn("filesystem watcher unavailable; relying on periodic scans", "err", err)
 		}
 	}
 
-	// Initial scan, then periodic reconciliation.
+	// Initial scan, then periodic reconciliation. The first pass makes the node
+	// useful immediately; later passes heal missed watcher events and detect
+	// files that were deleted while the daemon was offline.
 	go func() {
 		if err := scn.Run(ctx, ""); err != nil && !errors.Is(err, scanner.ErrScanRunning) {
 			log.Error("initial scan failed", "err", err)
@@ -296,6 +318,8 @@ func cmdSearch(args []string) error {
 	}
 	out := make(chan nodeResults, len(urls))
 	for _, u := range urls {
+		// Each node owns its own SQLite index, so fan-out search means asking all
+		// selected nodes concurrently and merging their answers locally.
 		go func(u string) {
 			r, err := queryNode(u, *token, body)
 			out <- nodeResults{url: u, results: r, err: err}

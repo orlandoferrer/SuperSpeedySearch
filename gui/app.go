@@ -61,6 +61,9 @@ func (a *App) Discover() []NodeInfo {
 	type source struct{ url, kind string }
 	seen := map[string]source{}
 
+	// The GUI is only a coordinator. It discovers or remembers nodes, probes
+	// their /v1/status endpoints, then asks selected nodes to search. It does
+	// not keep its own file index.
 	browseCtx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
 	defer cancel()
 	if found, err := discovery.Browse(browseCtx, 2*time.Second); err == nil {
@@ -88,6 +91,8 @@ func (a *App) Discover() []NodeInfo {
 			info := NodeInfo{URL: src.url, Source: src.kind, HasToken: a.settings.HasSpecificToken(src.url)}
 			c := client.New(src.url, a.settings.TokenFor(src.url))
 			c.HTTP.Timeout = 3 * time.Second
+			// Probe nodes concurrently so one sleeping/offline device does not
+			// make the entire node list feel frozen.
 			ctx, cancel := context.WithTimeout(a.ctx, 3*time.Second)
 			defer cancel()
 			st, err := c.Status(ctx)
@@ -210,6 +215,8 @@ func (a *App) StartContentSearch(query string, extensions []string, nodeURLs []s
 	if a.contentCancel != nil {
 		a.contentCancel()
 	}
+	// Store the cancel function so the UI can stop a long deep search. The
+	// context cancellation propagates through the client to the node request.
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.contentCancel = cancel
 	a.mu.Unlock()

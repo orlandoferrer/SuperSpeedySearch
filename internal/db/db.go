@@ -77,6 +77,10 @@ func Open(path string) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
+	// WAL lets readers and one writer coexist better than SQLite's default
+	// rollback journal. That matters here because searches may run while a scan
+	// is updating the index. synchronous=NORMAL is the usual durability/speed
+	// tradeoff for an index that can be rebuilt from the filesystem.
 	dsn := "file:" + path + "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -118,6 +122,9 @@ func (d *DB) SyncRoots(roots []RootRow, now int64) error {
 
 	ids := make([]string, 0, len(roots))
 	for _, r := range roots {
+		// Keep a copy of root settings in SQLite so later search responses can
+		// be understood even though the file rows only store root_id +
+		// relative_path. The live config is still authoritative.
 		ids = append(ids, r.ID)
 		_, err := tx.Exec(`
 			INSERT INTO scan_roots (id, path, display_prefix, open_uri_prefix, enabled, created_at, updated_at)
@@ -141,6 +148,9 @@ func (d *DB) SyncRoots(roots []RootRow, now int64) error {
 	if _, err := tx.Exec(`DELETE FROM scan_roots WHERE id NOT IN (`+placeholders+`)`, args...); err != nil {
 		return err
 	}
+	// If a root disappears from config, do not leave old files searchable.
+	// "Tombstone" means mark as deleted first; a later purge physically removes
+	// old tombstones after the retention window.
 	orphanArgs := append([]any{now}, args...)
 	if _, err := tx.Exec(`UPDATE files SET is_deleted = 1, deleted_at = ? WHERE is_deleted = 0 AND root_id NOT IN (`+placeholders+`)`, orphanArgs...); err != nil {
 		return err
@@ -214,6 +224,9 @@ func (d *DB) UpsertFiles(metas []FileMeta, scanID string, now int64) (UpsertResu
 		scanIDArg = scanID
 	}
 	for _, m := range metas {
+		// A file is identified by (root_id, relative_path). The scanner and
+		// watcher both feed FileMeta values here; this function decides whether
+		// each row is new, changed, restored from deleted, or merely seen again.
 		lower := strings.ToLower(m.Filename)
 		var (
 			id        int64
@@ -255,6 +268,9 @@ func (d *DB) UpsertFiles(metas []FileMeta, scanID string, now int64) (UpsertResu
 func (d *DB) MarkMissing(rootID, scanID string, scanStartedAt, now int64) (int64, error) {
 	d.writeMu.Lock()
 	defer d.writeMu.Unlock()
+	// Reconciliation rule: after a full root scan, any live row that was not
+	// touched by this scan probably no longer exists. The last_seen_at guard
+	// avoids deleting files that a watcher observed after the scan began.
 	r, err := d.SQL.Exec(`
 		UPDATE files SET is_deleted = 1, deleted_at = ?
 		WHERE root_id = ? AND is_deleted = 0
@@ -405,8 +421,13 @@ func (d *DB) SearchMetadata(f SearchFilter) ([]FileRow, error) {
 		f.Cap = 2000
 	}
 
-	// Score expression args come first: they appear in the SELECT list,
-	// before the WHERE clause, and SQLite binds positionally.
+	// The SQL query has two separate jobs:
+	// 1. WHERE decides whether a row matches all search terms at all.
+	// 2. scoreExpr classifies the quality of the match for ordering.
+	//
+	// Score expression args come first because the expression appears in the
+	// SELECT list before the WHERE clause, and SQLite binds placeholders in
+	// textual order.
 	var termConds []string
 	scoreArgs := []any{strings.ToLower(strings.TrimSpace(f.Query))}
 	for _, t := range f.Terms {

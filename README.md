@@ -13,6 +13,8 @@ search, mDNS discovery, CLI client), plus a Wails desktop GUI prototype in
 
 ## Quick start (macOS/Linux)
 
+Requires Go 1.26+.
+
 ```sh
 go build -o sss-node ./cmd/sss-node
 
@@ -35,6 +37,41 @@ curl -s -H "Authorization: Bearer $TOKEN" localhost:37373/v1/search/metadata \
 curl -sN -H "Authorization: Bearer $TOKEN" localhost:37373/v1/search/content \
   -d '{"query": "property tax", "extensions": [".txt", ".md"]}'
 ```
+
+## Run on multiple machines
+
+Install and run **one node per device or NAS container**. Each node keeps its
+own config, SQLite index, and auth token.
+
+1. Build or copy `sss-node` onto each Mac/Linux computer, or build the Docker
+   image for Synology.
+2. Give every node a unique `node.id` and friendly `node.name`.
+3. Configure that node's local scan roots. On Docker/Synology, `roots[].path`
+   is the container path such as `/mnt/documents`; use `open_uri_prefix` for
+   the SMB path clients should open, such as `smb://nas.local/documents`.
+4. Start each node and copy its generated token from the startup log or the
+   `auth_token` file beside the database.
+5. From another machine on the LAN, run `sss-node discover`. If mDNS is blocked
+   by Docker, firewall, VLANs, or VPNs, pass nodes manually with repeated
+   `-node http://host:37373` flags.
+6. Search across the fleet:
+
+```sh
+# easiest when all nodes share the same auth token
+export SSS_TOKEN=<token>
+sss-node search tax 2024
+
+# explicit nodes, useful across subnets or when mDNS is unavailable
+sss-node search \
+  -node http://macbook.local:37373 \
+  -node http://synology.local:37373 \
+  -token "$SSS_TOKEN" \
+  tax 2024
+```
+
+For nodes with different tokens, the desktop GUI can store a token per node.
+The CLI currently accepts one token for a fan-out search, so shared tokens are
+the simplest CLI setup.
 
 ## CLI
 
